@@ -68,6 +68,8 @@ def get_nonterminal(line, start_idx):
             break
         elif char == '#':
             break
+        elif char == '-':
+            break
         assert not(char == '(') and not(char == ')')
         output.append(char)
     return ''.join(output)
