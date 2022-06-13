@@ -2,6 +2,8 @@
 
 import argparse
 
+from tqdm import tqdm
+
 
 def is_valid_action_sequence(action_sequence):
     flag = True
@@ -150,12 +152,25 @@ def main():
         if len(output_actions) > 500:
             continue
 
+        new_output_actions = []
+        stack = []
+        for action in output_actions:
+            if action.startswith('NT('):
+                stack.append(action[3:-1])
+                new_output_actions.append(action)
+            elif action == 'REDUCE()':
+                nt = stack.pop()
+                new_output_actions.append('REDUCE({})'.format(nt))
+                new_output_actions.append('REDUCE({})'.format(nt))
+            else:
+                new_output_actions.append(action)
+
         if args.gen:
             if args.root:
                 print('[START]', end=' ')
-            print(' '.join(output_actions))
+            print(' '.join(new_output_actions))
         else:
-            print(' '.join(output_terms) + '\t' + ' '.join(output_actions))
+            print(' '.join(output_terms) + '\t' + ' '.join(new_output_actions))
 
 
 if __name__ == "__main__":

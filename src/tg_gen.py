@@ -12,11 +12,13 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AdamW
 import utils
 print = functools.partial(print, flush=True)
 
+ROOT = '[START]'
 
-class PLM:
+class TG:
     def __init__(self, is_random_init, NT_CATS, REDUCE, ROOT, device='cuda', model_name='gpt2', cache_dir='pretrained/gpt2'):
         # Load pretrained tokenizer
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+        self.device = device
 
         if is_random_init:
             print('Initialize with random weights', file=sys.stderr)
@@ -40,7 +42,7 @@ class PLM:
         self.NT_ACTIONS = ["NT({})".format(cat) for cat in self.NT_CATS]
         self.NT_ACTIONS_SET = set(self.NT_ACTIONS)
         self.NT_ACTIONS2NT_CAT = dict([["NT({})".format(cat), cat] for cat in self.NT_CATS])
-        self.ACTIONS_SET = set(self.NT_ACTIONS + [self.REDUCE]) # the set of non-terminal actions and reduce
+        self.ACTIONS_SET = set(self.NT_ACTIONS + self.REDUCE) # the set of non-terminal actions and reduce
 
         self.w_boundary_char = b'\xc4\xa0'.decode()
 
@@ -49,12 +51,12 @@ class PLM:
             a = "NT({})".format(cat)
             self.a2str[a] = '('+cat
 
-        self.num_added_toks = self.tokenizer.add_tokens(self.SPECIAL_BRACKETS + self.NT_ACTIONS + [self.REDUCE, self.ROOT])
+        self.num_added_toks = self.tokenizer.add_tokens(self.SPECIAL_BRACKETS + self.NT_ACTIONS + self.REDUCE + [self.ROOT])
         self.model.resize_token_embeddings(len(self.tokenizer))
 
         self.GEN_ids = self.tokenizer.convert_tokens_to_ids(self.GEN_VOCAB)
         self.NT_ids = self.tokenizer.convert_tokens_to_ids(self.NT_ACTIONS)
-        self.REDUCE_id = self.tokenizer.convert_tokens_to_ids(self.REDUCE)
+        self.REDUCE_ids = self.tokenizer.convert_tokens_to_ids(self.REDUCE)
 
     def tokenize_batch(self, line_batch):
         # Tokenize a batch of sequences. Add prefix space.
@@ -69,10 +71,10 @@ class PLM:
         '''
         flag = True
         if action in self.NT_ACTIONS_SET:
-            if (buffer_size == 0) or (nt_count - reduce_count > max_open_nt):
+            if (buffer_size == 0) or (nt_count - (reduce_count // 2) > max_open_nt):
                 flag = False
-        elif action == REDUCE:
-            if (prev_action in self.NT_ACTIONS_SET) or (buffer_size > 0 and nt_count-reduce_count == 1) or prev_action == ROOT:
+        elif action in self.REDUCE:
+            if (prev_action in self.NT_ACTIONS_SET) or (buffer_size > 0 and nt_count-(reduce_count//2) == 1) or prev_action == ROOT:
                 flag = False
         else:
             if (buffer_size == 0) or (prev_action == ROOT):
@@ -95,11 +97,8 @@ class PLM:
 
         while (nt_count-reduce_count != 0 or nt_count == 0) and nt_count < 40:
             input_ids = torch.tensor(prefix_ids).unsqueeze(0).to(device)
-            if add_structured_mask:
-                attention_mask = get_attention_mask_from_actions(prefix_tokens)
-                prediction_scores = self.model(input_ids, attention_mask=attention_mask)[0]
-            else:
-                prediction_scores = self.model(input_ids)[0] # batch size = 1
+            attention_mask = get_attention_mask_from_actions(prefix_tokens, device=self.device)
+            prediction_scores = self.model(input_ids, attention_mask=attention_mask)[0] # batch size = 1
 
             while True:
                 token_id = sample_from_scores(prediction_scores[:, -1], top_k=top_k)[0]
@@ -116,8 +115,9 @@ class PLM:
                 else:
                     tree_str += self.a2str[token] + ' '
                 nt_count += 1
-            elif token == REDUCE:
-                tree_str += ')'
+            elif token in self.REDUCE:
+                if reduce_count % 2 == 0:
+                    tree_str += ')'
                 reduce_count += 1
             else:
                 if token.startswith(self.w_boundary_char):
@@ -150,8 +150,8 @@ class PLM:
         if (prev_action in self.NT_ACTIONS_SET) or (buffer_size > 0 and nt_count-reduce_count == 1) or prev_action == ROOT:
             pass
         else:
-            valid_actions += [REDUCE]
-            valid_action_ids += [self.REDUCE_id]
+            valid_actions += self.REDUCE
+            valid_action_ids += self.REDUCE_ids
 
         # GEN action
         if buffer_size < 1 or prev_action == ROOT:
@@ -201,9 +201,12 @@ class PLM:
         Given a sequence of actions, return a bracketed tree string.
         '''
         tree_str = ""
+        reduce_count = 0
         for a in prefix_actions:
-            if a == REDUCE:
-                tree_str += ")"
+            if a in self.REDUCE:
+                if reduce_count % 2 == 0:
+                    tree_str += ")"
+                reduce_count += 1
             elif a in self.NT_ACTIONS_SET:
                 a_cat = self.NT_ACTIONS2NT_CAT[a]
                 tree_str += " (" + a_cat
@@ -240,14 +243,10 @@ class PLM:
 
             input_ids_batch = torch.tensor([self.tokenizer.convert_tokens_to_ids(p_this.prefix_actions + ['#' for _ in range(prefix_max_len-len(p_this.prefix_actions))]) for p_this in pq_this_batch]).to(device)
 
-            if add_structured_mask:
-                attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
-                for b_idx, p_this in enumerate(pq_this_batch):
-                    attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(p_this.prefix_actions, max_len=prefix_max_len)
-            else:
-                attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
-                for b_idx, p_this in enumerate(pq_this_batch):
-                    attention_mask_batch[b_idx, :, :, len(p_this.prefix_actions):] = 0
+
+            attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
+            for b_idx, p_this in enumerate(pq_this_batch):
+                attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(p_this.prefix_actions, max_len=prefix_max_len, device=self.device)
 
             prediction_scores_batch = self.model(input_ids_batch, attention_mask=attention_mask_batch)[0]
 
@@ -316,7 +315,7 @@ class PLM:
                 start_time = time.time()
 
                 for p_index, p_this in enumerate(pq_this):
-                    actions = self.NT_ACTIONS + [REDUCE] + [token]
+                    actions = self.NT_ACTIONS + self.REDUCE + [token]
                     buffer_size = len(tokens) - k
                     current_valid_actions = self.select_valid_actions(actions, p_this.nt_count, p_this.reduce_count, buffer_size, p_this.prev_a, max_open_nt=50)
 
@@ -336,7 +335,7 @@ class PLM:
                             a_idx = a2idx[action]
                         new_score = p_this.score + adist[a_idx].item()
                         new_nt_count = p_this.nt_count + 1 if action in self.NT_ACTIONS_SET else p_this.nt_count
-                        new_reduce_count = p_this.reduce_count + 1 if action == REDUCE else p_this.reduce_count
+                        new_reduce_count = p_this.reduce_count + 1 if action in self.REDUCE else p_this.reduce_count
                         p_state = ParserState(prefix_actions=p_this.prefix_actions+[action], score=new_score,
                                                 nt_count=new_nt_count, reduce_count=new_reduce_count, prev_a=action)
                         fringe.append(p_state)
@@ -383,6 +382,36 @@ class PLM:
 
         return tokens, surprisals
 
+    def get_hidden_states(self, lines, add_structured_mask):
+        line_batch = [ROOT + ' ' + line for line in lines]
+        tokens_batch = self.tokenize_batch(line_batch)
+
+        token_count_batch = [len(tokens) for tokens in tokens_batch]
+        batch_max_len = np.max(token_count_batch)
+
+        tokens_padded_batch = [tokens + [self.tokenizer.bos_token for _ in range(batch_max_len - len(tokens))] for
+                               tokens in tokens_batch]
+
+        ids_batch = [self.tokenizer.convert_tokens_to_ids(tokens_padded) for tokens_padded in tokens_padded_batch]
+        input_ids = torch.tensor(ids_batch).to(self.device)
+
+        label_ids_batch = [
+            self.tokenizer.convert_tokens_to_ids(tokens) + [-100 for _ in range(batch_max_len - len(tokens))] for tokens
+            in tokens_batch]
+        label_ids = torch.tensor(label_ids_batch).to(self.device)
+
+        attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(self.device)
+        for b_idx, tokens in enumerate(tokens_batch):
+            attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx],
+                                                                             max_len=batch_max_len,
+                                                                             device=self.device)
+
+        out =  self.model(input_ids, labels=label_ids, attention_mask=attention_mask, return_dict=True,
+                          output_hidden_states=True)
+        out_mask = torch.ones(len(tokens_batch), batch_max_len)
+        for b_idx, tokens in enumerate(tokens_batch):
+            out_mask[b_idx, len(tokens):] = 0
+        return out['hidden_states'][-1], out_mask
 
     def get_validation_loss(self, dev_lines, add_structured_mask):
         loss_sum = 0
@@ -394,16 +423,14 @@ class PLM:
             ids = self.tokenizer.convert_tokens_to_ids(tokens)
             input_ids = torch.tensor([ids]).to(device) # batch size = 1
 
-            if add_structured_mask:
-                # play actions on RNNG state machine to get the different states
-                # and derive mask values from them
-                # size [1, num_heads, from_seq_length, to_seq_length]
-                attention_mask = get_attention_mask_from_actions(tokens)
+            # play actions on RNNG state machine to get the different states
+            # and derive mask values from them
+            # size [1, num_heads, from_seq_length, to_seq_length]
+            attention_mask = get_attention_mask_from_actions(tokens, device=self.device)
 
-                # Update model
-                loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
-            else:
-                loss = self.model(input_ids, labels=input_ids)[0].item()
+            # Update model
+            loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
+
             loss_sum += loss*(len(tokens)-1)
             token_count += len(tokens) - 1
         return loss_sum/token_count
@@ -426,16 +453,10 @@ class PLM:
         label_ids_batch = [self.tokenizer.convert_tokens_to_ids(tokens) + [-100 for _ in range(batch_max_len - len(tokens))] for tokens in tokens_batch]
         label_ids = torch.tensor(label_ids_batch).to(device)
 
-        if add_structured_mask:
-            attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
-            for b_idx, tokens in enumerate(tokens_batch):
-                attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx], max_len=batch_max_len)
-            loss = self.model(input_ids, labels=label_ids, attention_mask=attention_mask)[0]
-        else:
-            attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
-            for b_idx, tokens in enumerate(tokens_batch):
-                attention_mask[b_idx, :, :, len(tokens):] = 0
-            loss = self.model(input_ids, labels=label_ids, attention_mask=attention_mask)[0]
+        attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
+        for b_idx, tokens in enumerate(tokens_batch):
+            attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx], max_len=batch_max_len, device=self.device)
+        loss = self.model(input_ids, labels=label_ids, attention_mask=attention_mask)[0]
 
         batch_token_count = np.sum(token_count_batch) - len(tokens_batch) # substract the count since len(tokens)-1 words are counted
         return loss, batch_token_count
@@ -464,16 +485,14 @@ class PLM:
             ids = self.tokenizer.convert_tokens_to_ids(tokens)
             input_ids = torch.tensor([ids]).to(device) # batch size = 1
 
-            if add_structured_mask:
-                # play actions on RNNG state machine to get the different states
-                # and derive mask values from them
-                # size [1, num_heads, from_seq_length, to_seq_length]
-                attention_mask = get_attention_mask_from_actions(tokens)
+            # play actions on RNNG state machine to get the different states
+            # and derive mask values from them
+            # size [1, num_heads, from_seq_length, to_seq_length]
+            attention_mask = get_attention_mask_from_actions(tokens, device=self.device)
 
-                # Update model
-                loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
-            else:
-                loss = self.model(input_ids, labels=input_ids)[0].item()
+            # Update model
+            loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
+
             loss_sum += loss*(len(tokens)-1)
             word_count += len([word for word in words if word not in self.ACTIONS_SET])
         return np.exp(loss_sum/word_count)
@@ -529,6 +548,7 @@ def prune(p_state_list, k):
 
 
 nt_re = re.compile('NT\((.*)\)')
+reduce_re = re.compile('REDUCE\((.*)\)')
 
 
 class RNNGMachine():
@@ -537,65 +557,53 @@ class RNNGMachine():
         self.nt_stack = []
         self.previous_stacks = []
         self.actions = []
+        self.need_reduce = False
         self.composed_nt = None
 
-    def get_valid_actions(self):
-        """Return valid actions for this state at test time"""
-
-        valid_actions = []
-
-        # This will expand to all NT(*) actions in train
-        valid_actions += ['NT']
-
-        if len(self.nt_stack) > 0:
-            if len(self.buffer):
-                valid_actions.append("GEN")
-
-            if (
-                # prohibit closing empty constituent
-                not self.actions[-1].startswith("NT(")
-                # prohibit closing top constituent if buffer not empty
-                and not len(self.nt_stack) == 1
-            ):
-                valid_actions.append(REDUCE)
-
-        return valid_actions, []
-
-    def update(self, action):
+    def update(self, action, mask_size):
+        mask = torch.zeros(mask_size)
 
         if nt_re.match(action):
+            assert not self.need_reduce
             label = nt_re.match(action).groups()[0]
-            self.nt_stack.append(label)
+            self.nt_stack.append(len(self.actions))
             self.previous_stacks.append(len(self.actions))
 
-        elif action == REDUCE:
+        elif reduce_re.match(action):
 
             # specify that start position of the non-terminal phrase to be composed
+            if not self.need_reduce:
+                self.need_reduce = True
+                assert len(self.nt_stack)
+                nt_idx = self.nt_stack.pop()
+                stack_idx = self.previous_stacks.index(nt_idx)
+                self.previous_stacks, compose = self.previous_stacks[:stack_idx], self.previous_stacks[stack_idx:]
 
-            assert len(self.nt_stack)
-            self.nt_stack.pop()
-            # move stack to containing previous constituent
-            if self.previous_stacks:
-                self.previous_stacks.pop()
-            if len(self.nt_stack) == 0:
-                self.is_closed = True
+                self.previous_stacks.append(len(self.actions))
+                mask[compose] = 1
+                mask[len(self.actions)] = 1
+                self.actions.append(action)
+                return mask
 
-        elif action == '[START]':
-            pass
+            else:
+                self.need_reduce = False
+                mask[len(self.actions)] = 1
+
+        else:
+            assert not self.need_reduce
+            self.previous_stacks.append(len(self.actions))
 
         # Store action
+        mask[self.previous_stacks] = 1
         self.actions.append(action)
+        return mask
 
 
-def get_attention_mask_from_actions(tokens, max_len=None):
+def get_attention_mask_from_actions(tokens, max_len=None, device='cuda'):
     '''
     Given a list of actions, it returns the attention head masks for all the
     parser states
     '''
-
-    # select which heads we mask
-    buffer_head = args.buffer_head
-    stack_head = args.stack_head
 
     # Start RNNG Machine
     rnng_machine = RNNGMachine()
@@ -609,13 +617,9 @@ def get_attention_mask_from_actions(tokens, max_len=None):
     attention_mask = attention_mask.to(device)
     for t, action in enumerate(tokens):
         # update machine
-        rnng_machine.update(action)
+        mask = rnng_machine.update(action, attention_mask.size()[-1])
         # store state as masks of transformer
-        if rnng_machine.previous_stacks:
-            # print(rnng_machine.actions[rnng_machine.previous_stacks[-1]:])
-            stack_position = rnng_machine.previous_stacks[-1]
-            attention_mask[:, buffer_head, t, stack_position:] = 0
-            attention_mask[:, stack_head, t, :stack_position] = 0
+        attention_mask[:, :, t, :] = mask.to(device)
 
     # ensure pad is zero at testing
     if max_len is not None:
@@ -657,10 +661,15 @@ if __name__ == "__main__":
     parser.add_argument('--add_structured_mask', action='store_true', help="Use structurally masked attention")
     parser.add_argument('--buffer_head', type=int, help='Specify the index of attention heads for buffer-related structural masks.')
     parser.add_argument('--stack_head', type=int, help='Specify the index of attention heads for stack-related structural masks.')
+    parser.add_argument('--gpu', type=str, default='-1',
+                        help='Specify the used gpu.')
 
     args = parser.parse_args()
 
     log_softmax = torch.nn.LogSoftmax(-1)
+
+    if args.gpu != '-1':
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -675,20 +684,15 @@ if __name__ == "__main__":
     NT_CATS = ['ADJP', 'ADVP', 'CONJP', 'FRAG', 'INTJ', 'LST', 'NAC', 'NP', 'NX', 'PP',
                'PRN', 'PRT', 'QP', 'RRC', 'S', 'SBAR', 'SBARQ', 'SINV', 'SQ', 'UCP', 'VP',
                'WHADJP', 'WHADVP', 'WHNP', 'WHPP', 'X']
-    REDUCE = 'REDUCE()'
+    REDUCE = ['REDUCE({})'.format(nt) for nt in NT_CATS]
     ROOT = '[START]'
 
-    plm = PLM(is_random_init=args.random_init, NT_CATS=NT_CATS, REDUCE=REDUCE, ROOT=ROOT, device=device)
+    tg = TG(is_random_init=args.random_init, NT_CATS=NT_CATS, REDUCE=REDUCE, ROOT=ROOT, device=device)
 
     if args.restore_from is not None:
         print('Load parameters from {}'.format(args.restore_from), file=sys.stderr)
         checkpoint = torch.load(args.restore_from)
-        plm.model.load_state_dict(checkpoint['model_state_dict'])
-
-    if args.add_structured_mask:
-        assert args.buffer_head is not None
-        assert args.stack_head is not None
-        print('Use structured attention mask: buffer_head {}; stack_head {}'.format(args.buffer_head, args.stack_head), file=sys.stderr)
+        tg.model.load_state_dict(checkpoint['model_state_dict'])
 
     # Train
     if args.do_train:
@@ -701,7 +705,7 @@ if __name__ == "__main__":
         print('Model path: {}'.format(MODEL_PATH), file=sys.stderr)
 
         # Set the learning rate of the optimizer
-        optimizer = AdamW(plm.model.parameters(), lr=args.lr)
+        optimizer = AdamW(tg.model.parameters(), lr=args.lr)
 
         # Load train and dev data
         train_data_path = args.train_data
@@ -712,10 +716,10 @@ if __name__ == "__main__":
         dev_lines = load_data(dev_data_path)
 
         if args.restore_from is not None:
-            plm.model.eval()
+            tg.model.eval()
             with torch.no_grad():
-                best_validation_loss = plm.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
-            plm.model.train()
+                best_validation_loss = tg.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
+            tg.model.train()
             print('resume training; validation loss: {}'.format(best_validation_loss))
         else:
             best_validation_loss = np.Inf
@@ -735,7 +739,7 @@ if __name__ == "__main__":
             for line_batch in get_batches(train_lines, args.batch_size):
                 optimizer.zero_grad()
 
-                loss, _ =plm.get_batch_loss(line_batch, add_structured_mask=args.add_structured_mask, device=device)
+                loss, _ =tg.get_batch_loss(line_batch, add_structured_mask=args.add_structured_mask, device=device)
 
                 loss.backward()
                 optimizer.step()
@@ -747,17 +751,17 @@ if __name__ == "__main__":
                     print('Epoch {:.3f} loss: {}'.format(epoch + count/len(train_lines), loss.item()))
 
                 if batch_count > 0  and batch_count % args.sample_every == 0:
-                    plm.model.eval()
+                    tg.model.eval()
                     with torch.no_grad():
-                        tree_str = plm.get_sample(prefix=ROOT, top_k=100, add_structured_mask=args.add_structured_mask)
+                        tree_str = tg.get_sample(prefix=ROOT, top_k=100, add_structured_mask=args.add_structured_mask)
                         print(tree_str)
-                    plm.model.train()
+                    tg.model.train()
 
                 if VALID_EVERY is not None:
                     if batch_count > 0  and batch_count % VALID_EVERY == 0:
-                        plm.model.eval()
+                        tg.model.eval()
                         with torch.no_grad():
-                            validation_loss = plm.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
+                            validation_loss = tg.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
                         print('Epoch {:.3f} validation loss: {}'.format(epoch + count/len(train_lines), validation_loss))
 
                         is_early_stop = early_stopping_counter.check_stopping_criterion(validation_loss)
@@ -773,14 +777,14 @@ if __name__ == "__main__":
                                 {'epoch': epoch,
                                 'add_structured_mask': args.add_structured_mask,
                                 'no_improvement_count': early_stopping_counter.counter,
-                                'model_state_dict': plm.model.state_dict(),
+                                'model_state_dict': tg.model.state_dict(),
                                 'loss': validation_loss}, MODEL_PATH)
-                        plm.model.train()
+                        tg.model.train()
 
 
-            plm.model.eval()
+            tg.model.eval()
             with torch.no_grad():
-                validation_loss = plm.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
+                validation_loss = tg.get_loss(dev_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
             print('Epoch', epoch, 'validation loss:', validation_loss)
 
             is_early_stop = early_stopping_counter.check_stopping_criterion(validation_loss)
@@ -797,30 +801,30 @@ if __name__ == "__main__":
                     {'epoch': epoch,
                     'add_structured_mask': args.add_structured_mask,
                     'no_improvement_count': early_stopping_counter.counter,
-                    'model_state_dict': plm.model.state_dict(),
+                    'model_state_dict': tg.model.state_dict(),
                     'loss': validation_loss}, MODEL_PATH)
 
-            plm.model.train()
+            tg.model.train()
 
     # Test
     if args.do_test:
-        plm.model.eval()
+        tg.model.eval()
         if args.test_data is None:
             raise ValueError('Test data not specified')
         test_data_path = args.test_data
         test_lines = load_data(test_data_path)
         with torch.no_grad():
-            test_loss = plm.get_validation_loss(test_lines, add_structured_mask=args.add_structured_mask)
+            test_loss = tg.get_validation_loss(test_lines, add_structured_mask=args.add_structured_mask)
             print('Test loss: {}'.format(test_loss))
-            test_loss = plm.get_loss(test_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
+            test_loss = tg.get_loss(test_lines, add_structured_mask=args.add_structured_mask, batch_size=args.batch_size)
             print('Test loss: {}'.format(test_loss))
-            ppl = plm.estimate_word_ppl(test_lines, add_structured_mask=args.add_structured_mask)
+            ppl = tg.estimate_word_ppl(test_lines, add_structured_mask=args.add_structured_mask)
             print('Approximate word PPL: {}'.format(ppl))
 
 
     # Estimate token surprisal values for unparsed sentences
     if args.do_eval:
-        plm.model.eval()
+        tg.model.eval()
 
         if args.fpath is not None:
             sents = load_data(args.fpath)
@@ -840,7 +844,7 @@ if __name__ == "__main__":
                 stimulus = ' ' + sent
 
             with torch.no_grad():
-                tokens, surprisals = plm.get_surprisals_with_beam_search(stimulus, add_structured_mask=args.add_structured_mask, beam_size=args.beam_size, word_beam_size=args.word_beam_size, fast_track_size=args.fast_track_size, debug=False)
+                tokens, surprisals = tg.get_surprisals_with_beam_search(stimulus, add_structured_mask=args.add_structured_mask, beam_size=args.beam_size, word_beam_size=args.word_beam_size, fast_track_size=args.fast_track_size, debug=False)
 
             index = 0
             for j, word in enumerate(words):
@@ -848,7 +852,7 @@ if __name__ == "__main__":
                 w_surprisal = 0
                 while index < len(tokens) and w_str != word:
                     token_str = tokens[index]
-                    if token_str.startswith(plm.w_boundary_char):
+                    if token_str.startswith(tg.w_boundary_char):
                         w_str += token_str[1:]
                     else:
                         w_str += token_str
