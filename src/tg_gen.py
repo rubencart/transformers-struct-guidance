@@ -249,12 +249,11 @@ class TG:
 
             # attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
             attention_mask_batch = torch.ones(len(pq_this_batch), self.config.n_head, prefix_max_len, prefix_max_len).to(device)
-            attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(
-                p_this.prefix_actions, n_heads=self.config.n_head,
-                max_len=prefix_max_len, device=self.device
-            )
             for b_idx, p_this in enumerate(pq_this_batch):
-                pass
+                attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(
+                    p_this.prefix_actions, n_heads=self.config.n_head,
+                    max_len=prefix_max_len, device=self.device
+                )
 
             prediction_scores_batch = self.model(input_ids_batch, attention_mask=attention_mask_batch)[0]
 
