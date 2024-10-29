@@ -3,7 +3,8 @@ import os.path
 from tqdm import tqdm
 
 bllip_path = '/cw/liir_data/NoCsBack/bllip_87_89_wsj'
-data_path = '/cw/liir_code/NoCsBack/wolf/projects/transformers-struct-guidance/data'
+# data_path = '/cw/liir_code/NoCsBack/wolf/projects/transformers-struct-guidance/data'
+data_path = '/cw/liir_code/NoCsBack/rubenc/transformers-struct-guidance/data'
 
 blip_dataset_type = 'lg'
 upper_directories = ['1987', '1988', '1989']

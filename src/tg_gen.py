@@ -8,6 +8,7 @@ import functools
 import numpy as np
 import nltk
 import torch
+from tqdm import tqdm
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AdamW
 import utils
 print = functools.partial(print, flush=True)
@@ -22,7 +23,8 @@ class TG:
 
         if is_random_init:
             print('Initialize with random weights', file=sys.stderr)
-            self.config = GPT2Config(len(self.tokenizer))
+            # self.config = GPT2Config(len(self.tokenizer))
+            self.config = GPT2Config.from_pretrained(model_name, vocab_size=len(self.tokenizer))
             self.model = GPT2LMHeadModel(self.config).to(device)
         else:
             print('Initialize with pretrained weights', file=sys.stderr)
@@ -57,6 +59,7 @@ class TG:
         self.GEN_ids = self.tokenizer.convert_tokens_to_ids(self.GEN_VOCAB)
         self.NT_ids = self.tokenizer.convert_tokens_to_ids(self.NT_ACTIONS)
         self.REDUCE_ids = self.tokenizer.convert_tokens_to_ids(self.REDUCE)
+        print('ok')
 
     def tokenize_batch(self, line_batch):
         # Tokenize a batch of sequences. Add prefix space.
@@ -97,7 +100,7 @@ class TG:
 
         while (nt_count-reduce_count != 0 or nt_count == 0) and nt_count < 40:
             input_ids = torch.tensor(prefix_ids).unsqueeze(0).to(device)
-            attention_mask = get_attention_mask_from_actions(prefix_tokens, device=self.device)
+            attention_mask = get_attention_mask_from_actions(prefix_tokens, device=self.device, n_heads=self.config.n_head)
             prediction_scores = self.model(input_ids, attention_mask=attention_mask)[0] # batch size = 1
 
             while True:
@@ -244,9 +247,13 @@ class TG:
             input_ids_batch = torch.tensor([self.tokenizer.convert_tokens_to_ids(p_this.prefix_actions + ['#' for _ in range(prefix_max_len-len(p_this.prefix_actions))]) for p_this in pq_this_batch]).to(device)
 
 
-            attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
+            # attention_mask_batch = torch.ones(len(pq_this_batch), 12, prefix_max_len, prefix_max_len).to(device)
+            attention_mask_batch = torch.ones(len(pq_this_batch), self.config.n_head, prefix_max_len, prefix_max_len).to(device)
             for b_idx, p_this in enumerate(pq_this_batch):
-                attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(p_this.prefix_actions, max_len=prefix_max_len, device=self.device)
+                attention_mask_batch[b_idx, :, :, :] = get_attention_mask_from_actions(
+                    p_this.prefix_actions, n_heads=self.config.n_head,
+                    max_len=prefix_max_len, device=self.device
+                )
 
             prediction_scores_batch = self.model(input_ids_batch, attention_mask=attention_mask_batch)[0]
 
@@ -400,11 +407,13 @@ class TG:
             in tokens_batch]
         label_ids = torch.tensor(label_ids_batch).to(self.device)
 
-        attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(self.device)
+        # attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(self.device)
+        attention_mask = torch.ones(len(tokens_batch), self.config.n_head, batch_max_len, batch_max_len).to(self.device)
         for b_idx, tokens in enumerate(tokens_batch):
             attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx],
                                                                              max_len=batch_max_len,
-                                                                             device=self.device)
+                                                                             device=self.device,
+                                                                             n_heads=self.config.n_head)
 
         out =  self.model(input_ids, labels=label_ids, attention_mask=attention_mask, return_dict=True,
                           output_hidden_states=True)
@@ -426,7 +435,7 @@ class TG:
             # play actions on RNNG state machine to get the different states
             # and derive mask values from them
             # size [1, num_heads, from_seq_length, to_seq_length]
-            attention_mask = get_attention_mask_from_actions(tokens, device=self.device)
+            attention_mask = get_attention_mask_from_actions(tokens, device=self.device, n_heads=self.config.n_head)
 
             # Update model
             loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
@@ -453,12 +462,14 @@ class TG:
         label_ids_batch = [self.tokenizer.convert_tokens_to_ids(tokens) + [-100 for _ in range(batch_max_len - len(tokens))] for tokens in tokens_batch]
         label_ids = torch.tensor(label_ids_batch).to(device)
 
-        attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
+        # attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
+        attention_mask = torch.ones(len(tokens_batch), self.config.n_head, batch_max_len, batch_max_len).to(device)
         for b_idx, tokens in enumerate(tokens_batch):
-            attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx], max_len=batch_max_len, device=self.device)
+            attention_mask[b_idx, :, :, :] = get_attention_mask_from_actions(tokens_batch[b_idx], max_len=batch_max_len,
+                                                                             device=self.device, n_heads=self.config.n_head)
         loss = self.model(input_ids, labels=label_ids, attention_mask=attention_mask)[0]
 
-        batch_token_count = np.sum(token_count_batch) - len(tokens_batch) # substract the count since len(tokens)-1 words are counted
+        batch_token_count = np.sum(token_count_batch) - len(tokens_batch)  # substract the count since len(tokens)-1 words are counted
         return loss, batch_token_count
 
     def get_loss(self, lines, add_structured_mask, batch_size, device='cuda'):
@@ -488,7 +499,7 @@ class TG:
             # play actions on RNNG state machine to get the different states
             # and derive mask values from them
             # size [1, num_heads, from_seq_length, to_seq_length]
-            attention_mask = get_attention_mask_from_actions(tokens, device=self.device)
+            attention_mask = get_attention_mask_from_actions(tokens, device=self.device, n_heads=self.config.n_head)
 
             # Update model
             loss = self.model(input_ids, labels=input_ids, attention_mask=attention_mask)[0].item()
@@ -599,7 +610,7 @@ class RNNGMachine():
         return mask
 
 
-def get_attention_mask_from_actions(tokens, max_len=None, device='cuda'):
+def get_attention_mask_from_actions(tokens, max_len=None, device='cuda', n_heads=12):
     '''
     Given a list of actions, it returns the attention head masks for all the
     parser states
@@ -609,10 +620,10 @@ def get_attention_mask_from_actions(tokens, max_len=None, device='cuda'):
     rnng_machine = RNNGMachine()
     if max_len is None:
         # single sentence
-        attention_mask = torch.ones(1, 12, len(tokens), len(tokens))
+        attention_mask = torch.ones(1, n_heads, len(tokens), len(tokens))
     else:
         # multiple sentence, we need to pad to max_len
-        attention_mask = torch.ones(1, 12, max_len, max_len)
+        attention_mask = torch.ones(1, n_heads, max_len, max_len)
 
     attention_mask = attention_mask.to(device)
     for t, action in enumerate(tokens):
@@ -661,8 +672,8 @@ if __name__ == "__main__":
     parser.add_argument('--add_structured_mask', action='store_true', help="Use structurally masked attention")
     parser.add_argument('--buffer_head', type=int, help='Specify the index of attention heads for buffer-related structural masks.')
     parser.add_argument('--stack_head', type=int, help='Specify the index of attention heads for stack-related structural masks.')
-    parser.add_argument('--gpu', type=str, default='-1',
-                        help='Specify the used gpu.')
+    parser.add_argument('--gpu', type=str, default='-1', help='Specify the used gpu.')
+    parser.add_argument('--architecture', type=str, help='', default='gpt2')
 
     args = parser.parse_args()
 
@@ -687,7 +698,9 @@ if __name__ == "__main__":
     REDUCE = ['REDUCE({})'.format(nt) for nt in NT_CATS]
     ROOT = '[START]'
 
-    tg = TG(is_random_init=args.random_init, NT_CATS=NT_CATS, REDUCE=REDUCE, ROOT=ROOT, device=device)
+    tg = TG(is_random_init=args.random_init, NT_CATS=NT_CATS, REDUCE=REDUCE, ROOT=ROOT, device=device,
+            model_name=args.architecture,
+            )
 
     if args.restore_from is not None:
         print('Load parameters from {}'.format(args.restore_from), file=sys.stderr)
@@ -731,12 +744,12 @@ if __name__ == "__main__":
 
         early_stopping_counter = utils.EarlyStopping(best_validation_loss=best_validation_loss, no_improvement_count=no_improvement_count, threshold=args.early_stopping_threshold)
 
-        for epoch in range(starting_epoch, n_epochs):
+        for epoch in tqdm(range(starting_epoch, n_epochs)):
             random.shuffle(train_lines)
             count = 0  # cumulative count of training examples
             batch_count = 0 # cumulative count of training batches
 
-            for line_batch in get_batches(train_lines, args.batch_size):
+            for line_batch in tqdm(get_batches(train_lines, args.batch_size)):
                 optimizer.zero_grad()
 
                 loss, _ =tg.get_batch_loss(line_batch, add_structured_mask=args.add_structured_mask, device=device)
@@ -804,6 +817,12 @@ if __name__ == "__main__":
                     'model_state_dict': tg.model.state_dict(),
                     'loss': validation_loss}, MODEL_PATH)
 
+            torch.save(
+                {'epoch': epoch,
+                 'add_structured_mask': args.add_structured_mask,
+                 'no_improvement_count': early_stopping_counter.counter,
+                 'model_state_dict': tg.model.state_dict(),
+                 'loss': validation_loss}, 'model/tg_last.params')
             tg.model.train()
 
     # Test

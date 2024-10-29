@@ -4,6 +4,15 @@ This repository accompanies the paper, [Structural Guidance for Transformer Lang
 
 ## Environment
 
+```
+conda create -n syntra python=3.6
+conda install pytorch==1.10.2 torchvision==0.11.3 torchaudio==0.10.2 cudatoolkit=11.3 -c pytorch -c conda-forge
+bash scripts/download_and_patch_transformers.sh
+pip install -e src/transformers/
+pip install nltk
+python -c "import nltk;nltk.download('punkt')"
+```
+
 The code is based on Python3. You can install the different modules with
 ```
 bash scripts/download_and_patch_transformers.sh
