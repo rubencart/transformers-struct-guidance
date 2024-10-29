@@ -1,3 +1,16 @@
+# Structural Guidance for Transformer Language Models + Transformer Grammars
+
+This is a fork of the [transformers-struct-guidance](https://github.com/IBM/transformers-struct-guidance) repository,
+to which we added code that we used to train larger models, as well as our version of the Transformer-Grammars model.
+Official code for this last model was later released too, see [transformer_grammars](https://github.com/google-deepmind/transformer_grammars), but
+it wasn't available at the time of our study.
+The rest of the code for our study is available in the [USCOCO](https://github.com/rubencart/USCOCO) repository.
+
+The `scripts/` folder contains various script that show how to run the code to train models, after
+having done the installation and data preparation as described below.
+
+Original readme:
+
 # Structural Guidance for Transformer Language Models
 
 This repository accompanies the paper, [Structural Guidance for Transformer Language Models](https://arxiv.org/pdf/2108.00104.pdf), published in ACL 2021. It includes inplementation of parsing-as-language-modelling and structural scaffolding for Transformer language models.
