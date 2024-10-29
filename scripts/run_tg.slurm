@@ -8,7 +8,7 @@
 #SBATCH --cluster=wice
 #SBATCH --gpus-per-node=1
 #SBATCH --partition=gpu
-#SBATCH -o "slrm.o${SLURM_JOBID}"
+#SBATCH -o slrm-%x.%j
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ruben.cartuyvels@kuleuven.be
 
@@ -23,12 +23,16 @@ SEED=${seed}
 cd $PROJECT_ROOT
 
 # Activate Conda environment.
-source $HOME/.bashrc
+source /user/leuven/335/vsc33568/.bashrc
 conda activate syntra
 export PYTHONPATH="$PYTHONPATH":"$PROJECT_ROOT"
 
 export CUDA_VISIBLE_DEVICES=0
 export TOKENIZERS_PARALLELISM=false
 
-# CUDA_VISIBLE_DEVICES=0 TOKENIZERS_PARALLELISM=false python -u src/main.py --cfg "$CONFIG_PATH" --seed "$SEED"
-python src/tg_gen.py --train_data data/tg_train_gen.oracle --dev_data data/tg_dev_gen.oracle --seed "${SEED}" --do_train --random_init --model_path "model/tg_${SEED}.params" --architecture "gpt2-medium"
+TRAIN_DATA=/scratch/leuven/335/vsc33568/transformers-struct-guidance/data/tg_train_gen.oracle
+DEV_DATA=/scratch/leuven/335/vsc33568/transformers-struct-guidance/data/tg_dev_gen.oracle
+MODEL_PATH=/scratch/leuven/335/vsc33568/transformers-struct-guidance/model/tg_$SEED.params
+
+python src/tg_gen.py --train_data "$TRAIN_DATA" --dev_data "$DEV_DATA" --seed "$SEED" --do_train --random_init --model_path "$MODEL_PATH" --architecture "gpt2-large"
+#python src/tg_gen.py --train_data "$TRAIN_DATA" --dev_data "$DEV_DATA" --seed "$SEED" --do_train --model_path "$MODEL_PATH" --architecture "gpt2-large" --restore_from "model/tg_last.params" --random_init

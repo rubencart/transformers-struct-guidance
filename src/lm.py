@@ -8,6 +8,8 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AdamW
 import torch
 import utils
 import functools
+from tqdm import tqdm
+
 print = functools.partial(print, flush=True)
 
 
@@ -16,14 +18,16 @@ class LM:
         # Load pretrained tokenizer
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name, cache_dir=cache_dir)
 
+        self.config = GPT2Config.from_pretrained(model_name, vocab_size=len(self.tokenizer))
         if is_random_init:
             print('Initialize with random weights', file=sys.stderr)
-            config = GPT2Config(len(self.tokenizer))
-            self.model = GPT2LMHeadModel(config).to(device)
+            # config = GPT2Config(len(self.tokenizer))
+            self.model = GPT2LMHeadModel(self.config).to(device)
         else:
             print('Initialize with pretrained weights', file=sys.stderr)
             self.model = GPT2LMHeadModel.from_pretrained(model_name, cache_dir=cache_dir).to(device)
 
+        print(self.model)
         self.w_boundary_char = b'\xc4\xa0'.decode()
 
     def get_batch_loss(self, data_batch, device='cuda'):
@@ -37,7 +41,7 @@ class LM:
 
         tokens_padded_batch = [tokens + [self.tokenizer.bos_token for _ in range(batch_max_len - len(tokens))] for tokens in tokens_batch]
 
-        attention_mask = torch.ones(len(tokens_batch), 12, batch_max_len, batch_max_len).to(device)
+        attention_mask = torch.ones(len(tokens_batch), self.config.n_head, batch_max_len, batch_max_len).to(device)
         for b_idx, tokens in enumerate(tokens_batch):
             attention_mask[b_idx, :, :, len(tokens):] = 0
 
@@ -161,6 +165,7 @@ if __name__ == "__main__":
     parser.add_argument('--random_init', action='store_true', help="Randomly initialize model parameters.")
     parser.add_argument('--fpath', type=str, help='Path to text file for estimating surprisals.')
     parser.add_argument('--pretokenized', action='store_true', help="Whether input sentences for evaluating surprisals are pertokenized or not.")
+    parser.add_argument('--architecture', type=str, help='', default='gpt2')
 
     args = parser.parse_args()
 
@@ -176,7 +181,7 @@ if __name__ == "__main__":
     print('Random seed: {}'.format(RANDOM_SEED), file=sys.stderr)
 
     # Initialize language model
-    lm = LM(is_random_init=args.random_init, device=device, model_name='gpt2', cache_dir='pretrained/gpt2')
+    lm = LM(is_random_init=args.random_init, device=device, model_name=args.architecture, cache_dir='pretrained/gpt2')
 
     # Restore from a model checkpoint
     if args.restore_from is not None:
@@ -223,13 +228,13 @@ if __name__ == "__main__":
 
         early_stopping_counter = utils.EarlyStopping(best_validation_loss=best_validation_loss, no_improvement_count=no_improvement_count, threshold=args.early_stopping_threshold)
 
-        for epoch in range(starting_epoch, n_epochs):
+        for epoch in tqdm(range(starting_epoch, n_epochs)):
             random.shuffle(train_lines)
 
             count = 0  # cumulative count of training examples
             batch_count = 0 # cumulative count of training batches
 
-            for train_data_batch in get_batches(train_lines, args.batch_size):
+            for train_data_batch in tqdm(get_batches(train_lines, args.batch_size)):
                 optimizer.zero_grad()
 
                 loss, batch_token_count = lm.get_batch_loss(train_data_batch)
@@ -269,6 +274,13 @@ if __name__ == "__main__":
                     'no_improvement_count': early_stopping_counter.counter,
                     'model_state_dict': lm.model.state_dict(),
                     'loss': validation_loss}, MODEL_PATH)
+
+            torch.save(
+                {'epoch': epoch,
+                 'no_improvement_count': early_stopping_counter.counter,
+                 'model_state_dict': lm.model.state_dict(),
+                 'loss': validation_loss},
+                f'model/lm_{RANDOM_SEED}_{args.architecture}_last.params')
 
             lm.model.train()
 
