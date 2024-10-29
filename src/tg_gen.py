@@ -21,15 +21,16 @@ class TG:
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         self.device = device
 
+        self.config = GPT2Config.from_pretrained(model_name, vocab_size=len(self.tokenizer))
         if is_random_init:
             print('Initialize with random weights', file=sys.stderr)
             # self.config = GPT2Config(len(self.tokenizer))
-            self.config = GPT2Config.from_pretrained(model_name, vocab_size=len(self.tokenizer))
             self.model = GPT2LMHeadModel(self.config).to(device)
         else:
             print('Initialize with pretrained weights', file=sys.stderr)
             self.model = GPT2LMHeadModel.from_pretrained(model_name, cache_dir=cache_dir).to(device)
 
+        print(self.model)
         # specify special tokens
         self.SPECIAL_BRACKETS = ['-LRB-', '-RRB-', '-LCB-', '-RCB-']
 
@@ -822,7 +823,9 @@ if __name__ == "__main__":
                  'add_structured_mask': args.add_structured_mask,
                  'no_improvement_count': early_stopping_counter.counter,
                  'model_state_dict': tg.model.state_dict(),
-                 'loss': validation_loss}, 'model/tg_last.params')
+                 'loss': validation_loss},
+                f'model/tg_{RANDOM_SEED}_{args.architecture}_last.params')
+
             tg.model.train()
 
     # Test
